@@ -125,7 +125,7 @@ class VAE(nn.Module):
         self.conv3 = nn.Conv2d(32, 32, 5, stride=1, padding=2)
         self.fc1 = nn.Linear(32 * 7 * 7, 450)
         self.fc_mu = nn.Linear(450, self.z_dim)
-        self.fc_sigma = nn.Linear(self.z_dim)
+        self.fc_sigma = nn.Linear(450, self.z_dim)
 
         # generative network (Decoder)
         self.fc_g1 = nn.Linear(self.z_dim, 450)
@@ -168,7 +168,7 @@ class VAE(nn.Module):
 
         h1 = F.softplus(self.fc_g1(z))
         h2 = F.softplus(self.fc_g2(h1))
-        h2_2d = h2.view(h2.size(0), 32 * 7 * 7)
+        h2_2d = h2.view(h2.size(0), 32, 7, 7)
         h3 = F.softplus(self.deconv1(h2_2d))
         h4 = F.softplus(self.deconv2(h3))
         logits = F.softplus(self.deconv3(h4))
@@ -187,7 +187,7 @@ class VAE(nn.Module):
             torch.Tensor: Bernoulli log-likelihood.
         """
 
-        return -F.binary_cross_entropy_with_logits(logits, x, reduction='none').sum(1, 2, 3)
+        return -F.binary_cross_entropy_with_logits(logits, x, reduction='none').sum([1, 2, 3])
 
 class HVAE(VAE):
     """
@@ -206,7 +206,7 @@ class HVAE(VAE):
             avg_logit (float): The average logit value for initialization.
         """
 
-        super.__init__(args, avg_logit)
+        super().__init__(args, avg_logit)
         self.K = args.K
         self.args = args # Store args for later use
         self._init_hvae_params()
@@ -217,7 +217,7 @@ class HVAE(VAE):
         init_lf = self.args.init_lf * np.ones(self.z_dim)
         init_lf_reparam = np.log(init_lf / (self.args.max_lf - init_lf))
 
-        if self.args.very_eps == 'true':
+        if self.args.vary_eps == 'true':
             # If varying epsilon, repeat step sizes for each leapfrog step
             init_lf_reparam = np.tile(init_lf_reparam, (self.K, 1))
 
@@ -328,15 +328,15 @@ class HVAE(VAE):
         p = p_0
 
         for k in range(1, self.K + 1):
-            if args.very_eps == 'true':
-                lp_eps = self.lp_eps[k - 1, :]
+            if args.vary_eps == 'true':
+                lf_eps = self.lf_eps[k - 1, :]
             else:
-                lp_eps = self.lp_eps
+                lf_eps = self.lf_eps
 
             # perform leapfrog steps
-            p_half = p - 0.5 * lp_eps * self._dU_dz(z, x)
-            z = z + lp_eps * p_half
-            p_temp = p_half - 0.5 * lp_eps * self._dU_dz(z, x)
+            p_half = p - 0.5 * lf_eps * self._dU_dz(z, x)
+            z = z + lf_eps * p_half
+            p_temp = p_half - 0.5 * lf_eps * self._dU_dz(z, x)
 
             # update momentum
             p = self.alphas[k - 1] * p_temp
@@ -356,7 +356,7 @@ class HVAE(VAE):
         """
         z.requires_grad_(True)
         net_out = self._gen_network(z)
-        U = F.softplus(net_out).sum(1, 2, 3) - (x * net_out).sum(1, 2, 3)
+        U = F.softplus(net_out).sum((1, 2, 3)) - (x * net_out).sum((1, 2, 3))
         grad_U = torch.autograd.grad(U.sum(), z)[0] + z
         return grad_U
 

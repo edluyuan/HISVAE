@@ -4,7 +4,7 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import matplotlib.pyplot as plt
 
-from HVAE import HVAE
+from Demo import HVAE
 import ssl
 # Hyperparameters and settings
 BATCH_SIZE = 128
@@ -33,7 +33,7 @@ class Args:
         self.max_lf = 0.1  # Maximum leapfrog step size
         self.vary_eps = 'false'  # Whether to vary epsilon across layers
         self.temp_method = 'free'  # Tempering method: 'free', 'fixed', or 'none'
-        self.init_alphas = 0.9  # Initial alpha for free tempering
+        self.init_alpha = 0.9  # Initial alpha for free tempering
         self.init_T_0 = 2.0  # Initial temperature for fixed tempering
 
 
