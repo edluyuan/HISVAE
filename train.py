@@ -4,11 +4,11 @@ from torch.utils.data import DataLoader
 from torchvision import datasets, transforms
 import matplotlib.pyplot as plt
 
-from Demo import HVAE
+from HVAE import HVAE
 import ssl
 # Hyperparameters and settings
 BATCH_SIZE = 128
-EPOCHS = 2000
+EPOCHS = 200
 LEARNING_RATE = 1e-3
 # DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu')
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
