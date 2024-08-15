@@ -214,7 +214,207 @@ class HVAE(VAE):
     def _init_hvae_params(self):
         """Initialize HVAE-specific parameters."""
 
-        init_lf
+        init_lf = self.args.init_lf * np.ones(self.z_dim)
+        init_lf_reparam = np.log(init_lf / (self.args.max_lf - init_lf))
+
+        if self.args.very_eps == 'true':
+            # If varying epsilon, repeat step sizes for each leapfrog step
+            init_lf_reparam = np.tile(init_lf_reparam, (self.K, 1))
+
+        self.lf_reparam = nn.Parameter(torch.tensor(init_lf_reparam, dtype=torch.float32))
+        self.temp_method = self.args.temp_method
+
+        if self.temp_method == 'free':
+            # Free tempering: learn alphas
+            init_alphas = self.args.init_alpha * np.ones(self.K)
+            init_alphas_reparam = np.log(init_alphas / (1 - init_alphas))
+            self.alphas_reparam = nn.Parameter(torch.tensor(init_alphas_reparam, dtype=torch.float32))
+        elif self.temp_method == 'fixed':
+            # Fixed tempering: learn T_0
+            init_T_0 = self.args.init_T_0
+            init_T_0_reparam = np.log(init_T_0 - 1)
+            self.T_0_reparam =  nn.Parameter(torch.tensor(init_T_0_reparam, dtype=torch.float32))
+        elif self.temp_method == 'none':
+            # No tempering
+            self.register_buffer('T_0', torch.tensor(1., dtype=torch.float32))
+            self.register_buffer('alphas', torch.tensor(self.K, dtype=torch.float32))
+        else:
+            raise ValueError(f'Tempering method {self.temp_method} not supported')
+
+    def get_elbo(self, x, args):
+        """
+        Compute the Evidence Lower BOund (ELBO) for the given input.
+
+        Args:
+            x (torch.Tensor): Input data.
+            args: An object containing model hyperparameters.
+
+        Returns:
+            torch.Tensor: The computed ELBO.
+        """
+        q_mu, q_sigma = self._inf_network(x)    # Inference network to get mean and std deviation
+
+        z_0 = q_mu + q_sigma * torch.rand_like(q_mu)    # Initial latent variable sample
+        p_0 = torch.sqrt(self.T_0) * torch.rand_like(q_mu)    # Initial momentum sample
+
+        z_K, p_K = self.his(z_0, p_0, x, args)  # Hamiltonian Importance Sampling (HIS) to get final z_K, p_K
+
+        p_x_given_zK_logits = self._gen_network(z_K)    # Generative network to get logits for p(x|z_K)
+        expected_log_likelihood = self._bernoulli_log_likelihood(x, p_x_given_zK_logits)
+
+        log_prob_zK = -0.5 * (z_K ** 2).sum(1)  # Log probability of z_K
+        log_prob_pK = -0.5 * (p_K ** 2).sum(1)  # Log probability of p_K
+        sum_log_simga = q_sigma.log().sum(1)    # Sum of log-sigma values
+
+        # Compute the negative KL term
+        neg_kl_term = log_prob_zK + log_prob_pK + sum_log_simga + self.z_dim
+        # ELBO is the sum of expected log-likelihood and the negative KL term
+        elbo = (expected_log_likelihood + neg_kl_term).mean()
+
+        return elbo
+
+    def get_nll(self, x, args):
+        """
+        Compute the Negative Log-Likelihood (NLL) for the given input.
+
+        Args:
+            x (torch.Tensor): Input data.
+            args: An object containing model hyperparameters.
+
+        Returns:
+            torch.Tensor: The computed NLL.
+        """
+        q_mu, q_sigma = self._inf_network(x)
+
+        z_0 = q_mu + q_sigma * torch.rand_like(q_mu)
+        p_0 = torch.sqrt(self.T_0) * torch.rand_like(q_mu)
+
+        z_K, p_K = self.his(z_0, p_0, x, args)
+
+        p_x_given_zK_logits = self._gen_network(z_K)
+        expected_log_likelihood = self._bernoulli_log_likelihood(x, p_x_given_zK_logits)
+
+        log_prob_z_K = -0.5 * (z_K ** 2).sum(1)
+        log_prob_p_K = -0.5 * (p_K ** 2).sum(1)
+        sum_log_sigma = q_sigma.log().sum(1)
+
+        log_prob_z_0 = -0.5 * (((z_0 - q_mu) / q_sigma) ** 2).sum(1)
+        log_prob_p_0 = -0.5 / self.T_0 * (p_0 ** 2).sum(1)
+
+        nll_samples = (expected_log_likelihood + log_prob_z_K + log_prob_p_K
+                       + sum_log_sigma + log_prob_z_0 + log_prob_p_0)
+
+        # Reshape and compute log-sum-exp for Importance Sampling (IS)
+        nll_samples_reshaped = nll_samples.view(args.n_IS, args.n_batch_test)
+        nll_lse = torch.logsumexp(nll_samples_reshaped, dim=0)
+        nll = np.log(args.n_IS) - nll_lse.mean()
+
+        return nll
+
+    def his(self, z_0, p_0, x, args):
+        """
+        Hamiltonian Importance Sampling.
+
+        Args:
+            z_0 (torch.Tensor): Initial position.
+            p_0 (torch.Tensor): Initial momentum.
+            x (torch.Tensor): Input data.
+            args: An object containing model hyperparameters.
+
+        Returns:
+            tuple: Final position and momentum after K steps.
+        """
+        z = z_0
+        p = p_0
+
+        for k in range(1, self.K + 1):
+            if args.very_eps == 'true':
+                lp_eps = self.lp_eps[k - 1, :]
+            else:
+                lp_eps = self.lp_eps
+
+            # perform leapfrog steps
+            p_half = p - 0.5 * lp_eps * self._dU_dz(z, x)
+            z = z + lp_eps * p_half
+            p_temp = p_half - 0.5 * lp_eps * self._dU_dz(z, x)
+
+            # update momentum
+            p = self.alphas[k - 1] * p_temp
+
+        return z, p
+
+    def _dU_dz(self, z, x):
+        """
+        Compute the gradient of the potential energy with respect to z.
+
+        Args:
+            z (torch.Tensor): Current position.
+            x (torch.Tensor): Input data.
+
+        Returns:
+            torch.Tensor: Gradient of the potential energy.
+        """
+        z.requires_grad_(True)
+        net_out = self._gen_network(z)
+        U = F.softplus(net_out).sum(1, 2, 3) - (x * net_out).sum(1, 2, 3)
+        grad_U = torch.autograd.grad(U.sum(), z)[0] + z
+        return grad_U
+
+    # Property to compute epsilon (leapfrog step size) in a differentiable manner
+    @property
+    def lf_eps(self):
+        """
+        Leapfrog step size.
+
+        Returns:
+            torch.Tensor: The leapfrog step size.
+        """
+        return torch.sigmoid(self.lf_reparam) * self.args.max_lf
+
+    # Property to compute alpha values for tempering
+    @property
+    def alphas(self):
+        """
+        Tempering parameters.
+
+        Returns:
+            torch.Tensor: The tempering parameters.
+        """
+        if self.temp_method == 'free':
+            return torch.sigmoid(self.alphas_reparam)   # Learnable alpha values
+        elif self.temp_method == 'fixed':
+            # Fixed alpha schedule based on T_0 and step k
+            T_0 = 1 + torch.exp(self.T_0_reparam)
+            k_vec = torch.arange(1, self.K + 1, dtype=torch.float32, device=self.lf_reparam.device)
+            k_m_1_vec = torch.arange(0, self.K, dtype=torch.float32, device=self.lf_reparam.device)
+            temp_sched = (1 - T_0) * k_vec ** 2 / self.K ** 2 + T_0
+            temp_sched_m_1 = (1 - T_0) * k_m_1_vec ** 2 / self.K ** 2 + T_0
+            return torch.sqrt(temp_sched / temp_sched_m_1)
+        else:
+            return self.alphas
+
+    # Property to compute the initial temperature T_0 for tempering
+    @property
+    def T_0(self):
+        """
+        Initial temperature.
+
+        Returns:
+            torch.Tensor: The initial temperature.
+        """
+        if self.temp_method == 'free':
+            return torch.prod(self.alphas) ** (-2)
+        elif self.temp_method == 'fixed':
+            return 1 + torch.exp(self.T_0_reparam)
+        else:
+            return self.T_0
+
+
+
+
+
+
+
 
 
 

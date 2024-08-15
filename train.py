@@ -33,7 +33,7 @@ class Args:
         self.max_lf = 0.1  # Maximum leapfrog step size
         self.vary_eps = 'false'  # Whether to vary epsilon across layers
         self.temp_method = 'free'  # Tempering method: 'free', 'fixed', or 'none'
-        self.init_alpha = 0.9  # Initial alpha for free tempering
+        self.init_alphas = 0.9  # Initial alpha for free tempering
         self.init_T_0 = 2.0  # Initial temperature for fixed tempering
 
 
